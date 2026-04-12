@@ -1,5 +1,5 @@
 {
-  "name": "open-higgsfield-ai",
+  "name": "open-generative-ai",
   "description": "Open-source alternative to Higgsfield AI — AI image, video, cinema and lip sync studio",
   "private": true,
   "version": "1.0.0",
@@ -20,8 +20,8 @@
     "electron:build:all": "vite build && electron-builder --mac --win"
   },
   "build": {
-    "appId": "ai.higgsfield.open",
-    "productName": "Open Higgsfield AI",
+    "appId": "ai.generative.open",
+    "productName": "Open Generative AI",
     "copyright": "Copyright © 2025",
     "directories": { "output": "release" },
     "afterPack": "./afterPack.js",
