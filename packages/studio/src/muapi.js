@@ -54,8 +54,14 @@ export async function generateImage(apiKey, params) {
     if (params.aspect_ratio) payload.aspect_ratio = params.aspect_ratio;
     if (params.resolution) payload.resolution = params.resolution;
     if (params.quality) payload.quality = params.quality;
-    if (params.image_url) { payload.image_url = params.image_url; payload.strength = params.strength || 0.6; }
-    else payload.image_url = null;
+    if (params.image_url) { 
+        payload.image_url = params.image_url; 
+        payload.strength = params.strength || 0.6; 
+    } else if (params.images_list) {
+        payload.images_list = params.images_list;
+    } else {
+        payload.image_url = null;
+    }
     if (params.seed && params.seed !== -1) payload.seed = params.seed;
     return submitAndPoll(endpoint, payload, apiKey, params.onRequestId, 60);
 }
@@ -225,6 +231,69 @@ export async function getPublishedWorkflows(apiKey) {
         throw new Error(`Failed to fetch published workflows: ${response.status} - ${errText.slice(0, 100)}`);
     }
     return await response.json();
+};
+
+// Agents — uses direct URL → https://api.muapi.ai/agents/...
+export async function getTemplateAgents(apiKey) {
+    const response = await fetch(`${BASE_URL}/agents/templates/agents`, {
+        headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey
+        }
+    });
+    if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Failed to fetch template agents: ${response.status} - ${errText.slice(0, 100)}`);
+    }
+    const data = await response.json();
+    return Array.isArray(data) ? data : (data.agents || data.items || []);
+};
+
+export async function getUserAgents(apiKey) {
+    const response = await fetch(`${BASE_URL}/agents/user/agents`, {
+        headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey
+        }
+    });
+    if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Failed to fetch user agents: ${response.status} - ${errText.slice(0, 100)}`);
+    }
+    const data = await response.json();
+    return Array.isArray(data) ? data : (data.agents || data.items || []);
+};
+
+export async function getPublishedAgents(apiKey) {
+    // MuAPI: GET /agents/featured/agents
+    const response = await fetch(`${BASE_URL}/agents/featured/agents`, {
+        headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey
+        }
+    });
+    if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Failed to fetch featured agents: ${response.status} - ${errText.slice(0, 100)}`);
+    }
+    const data = await response.json();
+    return Array.isArray(data) ? data : (data.agents || data.items || []);
+};
+
+// GET /agents/user/conversations — returns the user's chat history across all agents
+export async function getUserConversations(apiKey) {
+    const response = await fetch(`${BASE_URL}/agents/user/conversations`, {
+        headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey
+        }
+    });
+    if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Failed to fetch conversations: ${response.status} - ${errText.slice(0, 100)}`);
+    }
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
 };
 
 export async function createWorkflow(apiKey, payload) {

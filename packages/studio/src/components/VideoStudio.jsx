@@ -235,6 +235,8 @@ export default function VideoStudio({
   apiKey,
   onGenerationComplete,
   historyItems,
+  droppedFiles,
+  onFilesHandled,
 }) {
   const PERSIST_KEY = "hg_video_studio_persistent";
 
@@ -444,6 +446,19 @@ export default function VideoStudio({
     }
   }, [applyControlsForModel, defaultModel.id]);
 
+  // ── Adjust height on load ────────────────────────────────────────────────
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (textareaRef.current) {
+        const el = textareaRef.current;
+        el.style.height = "auto";
+        const maxH = window.innerWidth < 768 ? 150 : 250;
+        el.style.height = Math.min(el.scrollHeight, maxH) + "px";
+      }
+    }, 150);
+    return () => clearTimeout(timer);
+  }, []);
+
   // ── Persistence: Save ────────────────────────────────────────────────────
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -486,6 +501,86 @@ export default function VideoStudio({
     prompt,
     localHistory,
   ]);
+
+  // ── Derived UI values ────────────────────────────────────────────────────
+
+  const processDroppedImage = async (file) => {
+    if (file.size > 10 * 1024 * 1024) {
+      alert("Image exceeds 10MB limit.");
+      return;
+    }
+    setImageUploading(true);
+    setImageProgress(0);
+    try {
+      const url = await uploadFile(apiKey, file, (pct) => {
+        setImageProgress(pct);
+      });
+      setUploadedImageUrl(url);
+      setUploadedVideoUrl(null);
+      setUploadedVideoName(null);
+      setV2vMode(false);
+      if (!imageMode) {
+        const firstI2V = i2vModels[0];
+        setImageMode(true);
+        setSelectedModel(firstI2V.id);
+        setSelectedModelName(firstI2V.name);
+        applyControlsForModel(firstI2V.id, true, false);
+      }
+      setPromptDisabled(false);
+    } catch (err) {
+      alert(`Image upload failed: ${err.message}`);
+    } finally {
+      setImageUploading(false);
+      setImageProgress(0);
+    }
+  };
+
+  const processDroppedVideo = async (file) => {
+    if (file.size > 50 * 1024 * 1024) {
+      alert("Video exceeds 50MB limit.");
+      return;
+    }
+    setVideoUploading(true);
+    setVideoProgress(0);
+    try {
+      const url = await uploadFile(apiKey, file, (pct) => {
+        setVideoProgress(pct);
+      });
+      setUploadedVideoUrl(url);
+      setUploadedVideoName(file.name);
+      if (imageMode) {
+        setUploadedImageUrl(null);
+        setImageMode(false);
+      }
+      setV2vMode(true);
+      const firstV2V = v2vModels[0];
+      setSelectedModel(firstV2V.id);
+      setSelectedModelName(firstV2V.name);
+      applyControlsForModel(firstV2V.id, false, true);
+      setPrompt("");
+      setPromptDisabled(true);
+    } catch (err) {
+      alert(`Video upload failed: ${err.message}`);
+    } finally {
+      setVideoUploading(false);
+      setVideoProgress(0);
+    }
+  };
+
+  // ── Handle Dropped Files ────────────────────────────────────────────────
+  useEffect(() => {
+    if (droppedFiles && droppedFiles.length > 0) {
+      const imageFiles = droppedFiles.filter(f => f.type.startsWith('image/'));
+      const videoFiles = droppedFiles.filter(f => f.type.startsWith('video/'));
+      
+      if (videoFiles.length > 0) {
+        processDroppedVideo(videoFiles[0]);
+      } else if (imageFiles.length > 0) {
+        processDroppedImage(imageFiles[0]);
+      }
+      onFilesHandled?.();
+    }
+  }, [droppedFiles, onFilesHandled, processDroppedImage, processDroppedVideo]);
 
   // Initialise controls for default model on mount
   useEffect(() => {
@@ -910,7 +1005,7 @@ export default function VideoStudio({
               return (
                 <div
                   key={entry.id || idx}
-                  className="relative group rounded-2xl overflow-hidden border border-white/10 bg-[#0a0a0a] shadow-xl hover:border-primary/50 transition-all duration-300 flex flex-col"
+                  className="relative group rounded-lg overflow-hidden border border-white/10 bg-[#0a0a0a] shadow-xl hover:border-primary/50 transition-all duration-300 flex flex-col"
                 >
                   <video
                     src={entry.url}
@@ -1052,9 +1147,30 @@ export default function VideoStudio({
                 className={`w-10 h-10 shrink-0 rounded-full border transition-all flex items-center justify-center relative overflow-hidden ${uploadedImageUrl ? "border-primary/60 bg-primary/5" : "bg-white/5 border-white/[0.03] hover:bg-white/10 hover:border-primary/40"} group`}
               >
                 {imageUploading ? (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 z-10">
-                    <div className="w-4 h-4 rounded-full border border-primary/30 border-t-primary animate-spin mb-0.5" />
-                    <span className="text-[8px] font-black text-primary">
+                  <div className="flex flex-col items-center justify-center w-full h-full absolute inset-0 bg-black/80 z-20 backdrop-blur-[2px]">
+                    <svg className="w-8 h-8 -rotate-90">
+                      <circle
+                        cx="16"
+                        cy="16"
+                        r="14"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        fill="transparent"
+                        className="text-white/10"
+                      />
+                      <circle
+                        cx="16"
+                        cy="16"
+                        r="14"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        fill="transparent"
+                        strokeDasharray={88}
+                        strokeDashoffset={88 - (88 * imageProgress) / 100}
+                        className="text-primary transition-all duration-300"
+                      />
+                    </svg>
+                    <span className="absolute text-[9px] font-black text-primary leading-none">
                       {imageProgress}%
                     </span>
                   </div>
@@ -1117,9 +1233,30 @@ export default function VideoStudio({
                 className={`w-10 h-10 shrink-0 rounded-full border transition-all flex items-center justify-center relative overflow-hidden ${uploadedVideoUrl ? "border-primary/60 bg-white/5" : "bg-white/[0.03] border-white/[0.03] hover:bg-white/10 hover:border-primary/40"} group`}
               >
                 {videoUploading ? (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 z-10">
-                    <div className="w-4 h-4 rounded-full border border-primary/30 border-t-primary animate-spin mb-0.5" />
-                    <span className="text-[8px] font-black text-primary">
+                  <div className="flex flex-col items-center justify-center w-full h-full absolute inset-0 bg-black/80 z-20 backdrop-blur-[2px]">
+                    <svg className="w-8 h-8 -rotate-90">
+                      <circle
+                        cx="16"
+                        cy="16"
+                        r="14"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        fill="transparent"
+                        className="text-white/10"
+                      />
+                      <circle
+                        cx="16"
+                        cy="16"
+                        r="14"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        fill="transparent"
+                        strokeDasharray={88}
+                        strokeDashoffset={88 - (88 * videoProgress) / 100}
+                        className="text-primary transition-all duration-300"
+                      />
+                    </svg>
+                    <span className="absolute text-[9px] font-black text-primary leading-none">
                       {videoProgress}%
                     </span>
                   </div>

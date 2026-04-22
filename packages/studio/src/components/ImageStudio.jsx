@@ -242,9 +242,30 @@ function UploadButton({ apiKey, maxImages, onSelect, onClear, initialUrls = [] }
     let badge;
     if (uploading && !hasSelection) {
       badge = (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 z-10">
-          <div className="w-4 h-4 rounded-full border border-primary/30 border-t-primary animate-spin mb-0.5" />
-          <span className="text-[8px] font-black text-primary">
+        <div className="flex flex-col items-center justify-center w-full h-full absolute inset-0 bg-black/80 z-20 backdrop-blur-[2px]">
+          <svg className="w-8 h-8 -rotate-90">
+            <circle
+              cx="16"
+              cy="16"
+              r="14"
+              stroke="currentColor"
+              strokeWidth="2"
+              fill="transparent"
+              className="text-white/10"
+            />
+            <circle
+              cx="16"
+              cy="16"
+              r="14"
+              stroke="currentColor"
+              strokeWidth="2"
+              fill="transparent"
+              strokeDasharray={88}
+              strokeDashoffset={88 - (88 * lastUploadProgress) / 100}
+              className="text-primary transition-all duration-300"
+            />
+          </svg>
+          <span className="absolute text-[9px] font-black text-primary leading-none">
             {lastUploadProgress}%
           </span>
         </div>
@@ -718,6 +739,8 @@ export default function ImageStudio({
   apiKey,
   onGenerationComplete,
   historyItems,
+  droppedFiles,
+  onFilesHandled,
 }) {
   const PERSIST_KEY = "hg_image_studio_persistent";
 
@@ -747,6 +770,7 @@ export default function ImageStudio({
   // ── Canvas / history state ──────────────────────────────────────────────
   const [currentImageUrl, setCurrentImageUrl] = useState(null);
   const [activeHistoryIdx, setActiveHistoryIdx] = useState(0);
+  const [batchSize, setBatchSize] = useState(1);
   const [localHistory, setLocalHistory] = useState([]); // [{id,url,prompt,model,aspect_ratio,timestamp}]
 
   // Use prop history if provided, otherwise local
@@ -783,11 +807,20 @@ export default function ImageStudio({
         if (data.maxImages) setMaxImages(data.maxImages);
         if (data.prompt) setPrompt(data.prompt);
         if (data.uploadedImageUrls) setUploadedImageUrls(data.uploadedImageUrls);
+        if (data.batchSize) setBatchSize(data.batchSize);
         if (data.localHistory) setLocalHistory(data.localHistory);
       }
     } catch (err) {
       console.warn("Failed to load ImageStudio persistence:", err);
     }
+  }, []);
+
+  // ── Adjust height on load ────────────────────────────────────────────────
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      handleTextareaInput();
+    }, 150);
+    return () => clearTimeout(timer);
   }, []);
 
   // ── Persistence: Save ────────────────────────────────────────────────────
@@ -803,6 +836,7 @@ export default function ImageStudio({
           maxImages,
           prompt,
           uploadedImageUrls,
+          batchSize,
           localHistory,
         };
         localStorage.setItem(PERSIST_KEY, JSON.stringify(state));
@@ -820,8 +854,57 @@ export default function ImageStudio({
     maxImages,
     prompt,
     uploadedImageUrls,
+    batchSize,
     localHistory,
   ]);
+
+  const processDroppedImages = async (files) => {
+    const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
+    const tooLarge = files.filter((f) => f.size > MAX_IMAGE_SIZE);
+    if (tooLarge.length > 0) {
+      alert(
+        `The following images are too large (max 10MB): ${tooLarge.map((f) => f.name).join(", ")}`
+      );
+      return;
+    }
+
+    setGenerating(true); // Show as generating/busy
+    try {
+      const toUpload =
+        maxImages === 1 ? files.slice(0, 1) : files.slice(0, maxImages);
+      const urls = await Promise.all(
+        toUpload.map(async (file) => {
+          try {
+            return await uploadFile(apiKey, file);
+          } catch (err) {
+            console.error(
+              "[ImageStudio] Drop upload failed for",
+              file.name,
+              err
+            );
+            throw err;
+          }
+        })
+      );
+
+      handleUploadSelect({ urls });
+    } catch (err) {
+      alert(`Image upload failed: ${err.message}`);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  // ── Handle Dropped Files ────────────────────────────────────────────────
+  useEffect(() => {
+    if (droppedFiles && droppedFiles.length > 0) {
+      const imageFiles = droppedFiles.filter(f => f.type.startsWith('image/'));
+      if (imageFiles.length > 0) {
+        processDroppedImages(imageFiles);
+      }
+      onFilesHandled?.();
+    }
+  }, [droppedFiles, onFilesHandled, processDroppedImages]);
 
   // ── Derived: current model lists & helpers ───────────────────────────────
   const currentModels = imageMode ? i2iModels : t2iModels;
@@ -943,50 +1026,53 @@ export default function ImageStudio({
     setGenerateError(null);
 
     try {
-      let res;
-      if (imageMode) {
-        const genParams = {
-          model: selectedModelId,
-          images_list: uploadedImageUrls,
-          image_url: uploadedImageUrls[0],
-          aspect_ratio: selectedAr,
-        };
-        if (prompt.trim()) genParams.prompt = prompt.trim();
-        if (currentQualityField && selectedQuality) {
-          genParams[currentQualityField] = selectedQuality;
-        }
-        res = await generateI2I(apiKey, genParams);
-      } else {
-        const genParams = {
-          model: selectedModelId,
-          prompt: prompt.trim(),
-          aspect_ratio: selectedAr,
-        };
-        if (currentQualityField && selectedQuality) {
-          genParams[currentQualityField] = selectedQuality;
-        }
-        res = await generateImage(apiKey, genParams);
-      }
+      const results = await Promise.all(
+        Array.from({ length: batchSize }).map(async () => {
+          if (imageMode) {
+            const genParams = {
+              model: selectedModelId,
+              images_list: uploadedImageUrls,
+              image_url: uploadedImageUrls[0],
+              aspect_ratio: selectedAr,
+            };
+            if (prompt.trim()) genParams.prompt = prompt.trim();
+            if (currentQualityField && selectedQuality) {
+              genParams[currentQualityField] = selectedQuality;
+            }
+            return await generateI2I(apiKey, genParams);
+          } else {
+            const genParams = {
+              model: selectedModelId,
+              prompt: prompt.trim(),
+              aspect_ratio: selectedAr,
+            };
+            if (currentQualityField && selectedQuality) {
+              genParams[currentQualityField] = selectedQuality;
+            }
+            return await generateImage(apiKey, genParams);
+          }
+        })
+      );
 
-      if (res && res.url) {
-        const entry = {
-          id: res.id || Date.now().toString(),
-          url: res.url,
-          prompt: prompt.trim(),
-          model: selectedModelId,
-          aspect_ratio: selectedAr,
-          timestamp: new Date().toISOString(),
-        };
-        addToHistory(entry);
-        onGenerationComplete?.({
-          url: res.url,
-          model: selectedModelId,
-          prompt: prompt.trim(),
-          type: "image",
-        });
-      } else {
-        throw new Error("No image URL returned by API");
-      }
+      results.forEach((res) => {
+        if (res && res.url) {
+          const entry = {
+            id: res.id || Math.random().toString(36).substring(7),
+            url: res.url,
+            prompt: prompt.trim(),
+            model: selectedModelId,
+            aspect_ratio: selectedAr,
+            timestamp: new Date().toISOString(),
+          };
+          addToHistory(entry);
+          onGenerationComplete?.({
+            url: res.url,
+            model: selectedModelId,
+            prompt: prompt.trim(),
+            type: "image",
+          });
+        }
+      });
     } catch (e) {
       console.error("[ImageStudio] Generation failed:", e);
       setGenerateError(e.message.slice(0, 80));
@@ -1254,6 +1340,24 @@ export default function ImageStudio({
                   )}
                 </div>
               )}
+
+              {/* Batch size selector */}
+              <div className="flex items-center gap-1 bg-white/[0.03] rounded-md p-1 border border-white/[0.03]">
+                {[1, 2, 3, 4].map((num) => (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => setBatchSize(num)}
+                    className={`w-7 h-7 flex items-center justify-center rounded-md text-[10px] font-black transition-all ${
+                      batchSize === num
+                        ? "bg-[#d9ff00] text-black shadow-lg shadow-[#d9ff00]/20"
+                        : "text-white/40 hover:text-white/80 hover:bg-white/5"
+                    }`}
+                  >
+                    {num}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Generate button */}

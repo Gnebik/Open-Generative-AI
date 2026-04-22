@@ -4,7 +4,9 @@
   "private": true,
   "version": "1.0.2",
   "workspaces": [
-    "packages/studio"
+    "packages/studio",
+    "packages/workflow-ui",
+    "packages/ai-agent"
   ],
   "scripts": {
     "dev": "next dev",
@@ -90,7 +92,8 @@
     "react-dom": "^19.0.0",
     "react-hot-toast": "^2.4.1",
     "studio": "*",
-    "workflow-builder": "file:./packages/workflow-ui"
+    "workflow-builder": "file:./packages/workflow-ui",
+    "ai-agent": "file:./packages/ai-agent"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
