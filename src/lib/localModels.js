@@ -66,7 +66,7 @@ export const LOCAL_MODEL_CATALOG = [
         description: 'High quality anime and illustration style image generation.',
         type: 'sd1',
         provider: 'sdcpp',
-        filename: 'anything-v5-PrtRE.safetensors',
+        filename: 'Anything-v5.0-PRT.safetensors',
         sizeGB: 2.1,
         aspectRatios: ['1:1', '4:3', '3:4', '16:9', '9:16'],
         defaultSteps: 20,
