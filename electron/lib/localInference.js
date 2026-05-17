@@ -4,7 +4,15 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const { spawn, execFile } = require('child_process');
-const os = require('os');
+const {
+    getBundledBinaryResourceDir,
+    pickBinaryAssetForPlatform,
+} = require('./localInferenceAssets');
+const {
+    parseGenerationProgressChunk,
+    resolveGenerationSteps,
+    resolveGuidanceScale,
+} = require('./localInferenceRuntime');
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 const DATA_DIR = path.join(app.getPath('userData'), 'local-ai');
@@ -27,40 +35,6 @@ const activeDownloads = new Map(); // modelId → request object
 // Asset names look like: sd-master-44cca3d-bin-Darwin-macOS-15.7.4-arm64.zip
 // We pick the best match in priority order so a single release that only
 // ships e.g. avx512 still resolves cleanly.
-function pickBinaryAsset(zipNames) {
-    const { platform, arch } = process;
-
-    // The "cudart" zip in recent leejet releases is just the CUDA runtime DLLs,
-    // not an sd-cli build, so it must never satisfy the Windows match.
-    const isSdCliZip = (n) => n.startsWith('sd-master-') || n.includes('-bin-');
-    const candidates = zipNames.filter(isSdCliZip);
-
-    if (platform === 'darwin') {
-        // leejet only publishes arm64 macOS builds. Mac Intel must use the
-        // hosted API instead — caller maps the empty result to a clear error.
-        if (arch !== 'arm64') return null;
-        return candidates.find(n => n.includes('Darwin') && n.includes('arm64')) || null;
-    }
-    if (platform === 'win32') {
-        // Priority: avx2 > avx > avx512 > noavx > cuda12. cuda needs the
-        // separate cudart runtime so we only fall back to it if nothing else.
-        const winCandidates = candidates.filter(n => /win-(avx2?|avx512|noavx|cuda12|cu12)-x64/.test(n));
-        const order = ['win-avx2-x64', 'win-avx-x64', 'win-avx512-x64', 'win-noavx-x64', 'win-cuda12-x64', 'win-cu12-x64'];
-        for (const tag of order) {
-            const hit = winCandidates.find(n => n.includes(tag));
-            if (hit) return hit;
-        }
-        return null;
-    }
-    // Linux: prefer plain x86_64, then vulkan, then rocm.
-    const linuxCandidates = candidates.filter(n => n.includes('Linux') && n.includes('x86_64'));
-    const plain = linuxCandidates.find(n => !n.includes('rocm') && !n.includes('vulkan'));
-    return plain
-        || linuxCandidates.find(n => n.includes('vulkan'))
-        || linuxCandidates.find(n => n.includes('rocm'))
-        || null;
-}
-
 function fetchJson(url) {
     return new Promise((resolve, reject) => {
         https.get(url, { headers: { 'User-Agent': 'open-generative-ai' } }, (res) => {
@@ -190,8 +164,43 @@ function findFile(dir, name) {
     return null;
 }
 
+function ensureBinaryPermissions() {
+    if (process.platform === 'win32') return;
+
+    for (const fileName of [
+        BINARY_NAME,
+        'sd-server',
+        'libstable-diffusion.dylib',
+        'libstable-diffusion.so',
+    ]) {
+        const fullPath = findFile(BIN_DIR, fileName);
+        if (fullPath) fs.chmodSync(fullPath, 0o755);
+    }
+}
+
+function ensureBundledBinaryInstalled() {
+    if (fs.existsSync(BINARY_PATH)) {
+        ensureBinaryPermissions();
+        return true;
+    }
+
+    if (!app.isPackaged) return false;
+
+    const bundledDir = getBundledBinaryResourceDir({
+        resourcesPath: process.resourcesPath,
+        platform: process.platform,
+        arch: process.arch,
+    });
+    const bundledBinaryPath = path.join(bundledDir, BINARY_NAME);
+    if (!fs.existsSync(bundledBinaryPath)) return false;
+
+    fs.cpSync(bundledDir, BIN_DIR, { recursive: true, force: true });
+    ensureBinaryPermissions();
+    return fs.existsSync(BINARY_PATH);
+}
+
 async function getBinaryStatus() {
-    const exists = fs.existsSync(BINARY_PATH);
+    const exists = ensureBundledBinaryInstalled() || fs.existsSync(BINARY_PATH);
     return { exists, path: BINARY_PATH };
 }
 
@@ -206,6 +215,11 @@ async function downloadBinary(mainWindow) {
 
     try {
         send({ phase: 'fetching-release', progress: 0 });
+
+        if (ensureBundledBinaryInstalled()) {
+            send({ phase: 'done', progress: 1 });
+            return { ok: true, source: 'bundled' };
+        }
 
         const platformKey = `${process.platform}-${process.arch}`;
         const customUrl = CUSTOM_BINARIES[platformKey];
@@ -230,7 +244,11 @@ async function downloadBinary(mainWindow) {
                 const zips = (release.assets || [])
                     .filter(a => a.name.endsWith('.zip'));
                 lastSeen = zips.map(a => a.name);
-                const pickedName = pickBinaryAsset(lastSeen);
+                const pickedName = pickBinaryAssetForPlatform({
+                    platform: process.platform,
+                    arch: process.arch,
+                    zipNames: lastSeen,
+                });
                 if (pickedName) {
                     chosen = zips.find(a => a.name === pickedName);
                     break;
@@ -240,6 +258,9 @@ async function downloadBinary(mainWindow) {
             if (!chosen) {
                 if (process.platform === 'darwin' && process.arch !== 'arm64') {
                     throw new Error('Local inference on macOS only supports Apple Silicon (M1/M2/M3/M4). Mac Intel is not supported by stable-diffusion.cpp upstream.');
+                }
+                if (process.platform === 'linux' && process.arch === 'arm64') {
+                    throw new Error('No upstream stable-diffusion.cpp binary found for linux-arm64. Install a build that bundles local-ai/linux-arm64/bin or provide the binary manually.');
                 }
                 const available = lastSeen.join(', ') || '(none)';
                 throw new Error(`No binary found for ${process.platform}-${process.arch} in the last 15 releases. Latest release assets: ${available}`);
@@ -267,13 +288,7 @@ async function downloadBinary(mainWindow) {
             fs.renameSync(foundBinary, BINARY_PATH);
         }
 
-        // Make binary executable on Unix
-        if (process.platform !== 'win32') {
-            fs.chmodSync(BINARY_PATH, 0o755);
-            // Also chmod the dylib so it can be loaded
-            const dylib = findFile(BIN_DIR, 'libstable-diffusion.dylib');
-            if (dylib) fs.chmodSync(dylib, 0o755);
-        }
+        ensureBinaryPermissions();
 
         // macOS: strip Gatekeeper quarantine so the downloaded binary can run
         if (process.platform === 'darwin') {
@@ -384,6 +399,7 @@ async function generate(params, mainWindow) {
     const { LOCAL_MODEL_CATALOG, ZIMAGE_AUXILIARY } = require('./modelCatalog');
     const send = (data) => mainWindow?.webContents.send('local-ai:progress', data);
 
+    ensureBundledBinaryInstalled();
     if (!fs.existsSync(BINARY_PATH)) throw new Error('sd.cpp binary not installed. Download it in Settings > Local Models.');
 
     const model = LOCAL_MODEL_CATALOG.find(m => m.id === params.model);
@@ -403,8 +419,8 @@ async function generate(params, mainWindow) {
     const seed = params.seed && params.seed !== -1 ? params.seed : Math.floor(Math.random() * 2147483647);
     const outPath = path.join(TMP_DIR, `gen-${Date.now()}.png`);
 
-    const steps = model.defaultSteps || params.steps || 20;
-    const cfgScale = model.defaultGuidance !== undefined ? model.defaultGuidance : (params.guidance_scale || 7.5);
+    const steps = resolveGenerationSteps(params, model);
+    const cfgScale = resolveGuidanceScale(params, model);
     const sampler = model.sampler || 'euler_a';
 
     // z-image GGUFs are standalone diffusion transformers loaded via --diffusion-model.
@@ -445,23 +461,21 @@ async function generate(params, mainWindow) {
     }
 
     return new Promise((resolve, reject) => {
-        send({ step: 0, totalSteps: params.steps || model.defaultSteps || 20, status: 'starting' });
+        send({ step: 0, totalSteps: steps, status: 'starting', progress: 0 });
 
         console.log('[sd-cli] command:', BINARY_PATH, args.join(' '));
         // DYLD_LIBRARY_PATH lets macOS find libstable-diffusion.dylib next to sd-cli
         const spawnEnv = { ...process.env, DYLD_LIBRARY_PATH: BIN_DIR, LD_LIBRARY_PATH: BIN_DIR };
         activeProcess = spawn(BINARY_PATH, args, { env: spawnEnv });
-        const stepRegex = /step\s+(\d+)\/(\d+)/i;
+        const progressState = { tail: '', lastStep: 0, lastTotalSteps: 0 };
         const outputLines = [];
 
         const handleOutput = (data) => {
             const line = data.toString();
             outputLines.push(line.trimEnd());
-            const match = line.match(stepRegex);
-            if (match) {
-                const step = parseInt(match[1]);
-                const total = parseInt(match[2]);
-                send({ step, totalSteps: total, status: 'generating', progress: step / total });
+            const progressEvents = parseGenerationProgressChunk(line, progressState);
+            for (const event of progressEvents) {
+                send({ ...event, status: 'generating' });
             }
         };
 
@@ -485,7 +499,7 @@ async function generate(params, mainWindow) {
                 const imgBuffer = fs.readFileSync(outPath);
                 const dataUrl = `data:image/png;base64,${imgBuffer.toString('base64')}`;
                 fs.unlinkSync(outPath);
-                send({ step: 1, totalSteps: 1, status: 'done', progress: 1 });
+                send({ step: steps, totalSteps: steps, status: 'done', progress: 1 });
                 resolve({ url: dataUrl, seed });
             } catch (err) {
                 reject(err);
@@ -523,4 +537,6 @@ function register() {
     ipcMain.handle('local-ai:cancel-generation', () => cancelGeneration());
 }
 
-module.exports = { register };
+module.exports = {
+    register,
+};
